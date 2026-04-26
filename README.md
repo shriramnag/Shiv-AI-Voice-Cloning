@@ -3,7 +3,7 @@
 
 Run **OmniVoice** easily on Google Colab, no complex setup required.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NeuralFalconYT/omnivoice-colab/blob/main/OmniVoice_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/shriramnag/Shiv-AI-Voice-Cloning/blob/main/ShivAIVoice_Colab.ipynb)
 
 ---
 
