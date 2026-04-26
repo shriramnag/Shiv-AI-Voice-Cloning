@@ -30,9 +30,6 @@ try:
 except ImportError:
     WHISPER_LANGUAGE_CODE = None
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s: %(message)s")
 print("🔱 Shiv AI Voice Cloning starting... by Shri Ram Nag")
 
@@ -60,11 +57,24 @@ sampling_rate = model.sampling_rate
 print("✅ Shiv AI Model Loaded!")
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Constants
 # ---------------------------------------------------------------------------
 EVENT_TAGS = [
     "[laughter]", "[sigh]", "[confirmation-en]", "[question-en]",
     "[surprise-wa]", "[dissatisfaction-hnn]"
+]
+
+LANG_CHOICES = ["Auto"] + sorted(lang_display_name(n) for n in LANG_NAMES)
+
+INSTRUCT_EXAMPLES = [
+    "Speak slowly and clearly with a calm, deep voice",
+    "Speak with excitement and high energy",
+    "Speak softly like a bedtime story",
+    "Speak like a news anchor, formal and clear",
+    "Speak in a sad, emotional tone",
+    "Speak fast and enthusiastically like a sports commentator",
+    "धीरे और शांत आवाज़ में बोलें",
+    "जोश और उत्साह के साथ बोलें",
 ]
 
 INSERT_TAG_JS = """
@@ -77,138 +87,256 @@ INSERT_TAG_JS = """
 }
 """
 
-LANG_CHOICES = ["Auto"] + sorted(lang_display_name(n) for n in LANG_NAMES)
+# ---------------------------------------------------------------------------
+# ✅ LONG TEXT CHUNKING — Main Fix
+# ---------------------------------------------------------------------------
+# Max characters per chunk (tune karo agar zaroorat ho)
+MAX_CHUNK_CHARS = 150
 
-def make_gen_config(num_step=32, guidance_scale=2.0):
-    return OmniVoiceGenerationConfig(
-        num_step=num_step,
-        guidance_scale=guidance_scale,
-        denoise=True,
-        preprocess_prompt=True,
-        postprocess_output=True,
+def split_text_into_chunks(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list:
+    """
+    Long script ko natural chunks mein todta hai:
+    1. Pehle '…' aur newline pe todta hai (natural pauses)
+    2. Phir bade chunks ko sentence boundary pe todta hai
+    3. Har chunk max_chars se zyada nahi hoga
+    """
+    # Step 1: Split on ellipsis + newline (script style)
+    # '…\n' ya '\n' pe split karo
+    raw_lines = re.split(r'(?:…\n|…|\n)', text)
+    raw_lines = [l.strip() for l in raw_lines if l.strip()]
+
+    chunks = []
+    current = ""
+
+    for line in raw_lines:
+        # Agar line khud badi hai, use sentence boundary pe todo
+        if len(line) > max_chars:
+            # Pehle current flush karo
+            if current.strip():
+                chunks.append(current.strip())
+                current = ""
+            # Bade line ko sentences pe todo
+            sentences = re.split(r'(?<=[।.!?])\s+', line)
+            temp = ""
+            for sent in sentences:
+                if len(temp) + len(sent) + 1 <= max_chars:
+                    temp = (temp + " " + sent).strip()
+                else:
+                    if temp:
+                        chunks.append(temp.strip())
+                    temp = sent.strip()
+            if temp:
+                chunks.append(temp.strip())
+        else:
+            # Normal line — current mein add karo
+            if len(current) + len(line) + 1 <= max_chars:
+                current = (current + " " + line).strip()
+            else:
+                if current:
+                    chunks.append(current.strip())
+                current = line.strip()
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    # Empty chunks hata do
+    chunks = [c for c in chunks if c.strip()]
+    return chunks
+
+
+def generate_audio_for_chunk(chunk_text, language, gen_config, voice_clone_prompt=None, instruct=None):
+    """Single chunk ka audio generate karo"""
+    kw = dict(
+        text=chunk_text,
+        language=language if language != "Auto" else None,
+        generation_config=gen_config,
     )
+    if voice_clone_prompt is not None:
+        kw["voice_clone_prompt"] = voice_clone_prompt
+    if instruct is not None:
+        kw["instruct"] = instruct
+
+    audio = model.generate(**kw)
+    return audio[0]  # numpy array, float
+
+
+def join_audio_chunks(chunks_audio: list, silence_ms: int = 300) -> np.ndarray:
+    """
+    Saare audio chunks ko ek saath jodo.
+    Beech mein thodi si silence (natural pauses ke liye).
+    """
+    silence_samples = int(sampling_rate * silence_ms / 1000)
+    silence = np.zeros(silence_samples, dtype=np.float32)
+
+    result = []
+    for i, chunk in enumerate(chunks_audio):
+        result.append(chunk)
+        if i < len(chunks_audio) - 1:
+            result.append(silence)
+
+    return np.concatenate(result)
+
+
+def make_gen_config(num_step=32, guidance_scale=2.0, speed=1.0, pitch=0, energy=1.0):
+    """Generation config banao — speed/pitch/energy optional"""
+    try:
+        return OmniVoiceGenerationConfig(
+            num_step=num_step,
+            guidance_scale=guidance_scale,
+            denoise=True,
+            preprocess_prompt=True,
+            postprocess_output=True,
+            speed=speed,
+            pitch=pitch,
+            energy=energy,
+        )
+    except TypeError:
+        # Agar model speed/pitch/energy support nahi karta
+        return OmniVoiceGenerationConfig(
+            num_step=num_step,
+            guidance_scale=guidance_scale,
+            denoise=True,
+            preprocess_prompt=True,
+            postprocess_output=True,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Core Generation Functions
 # ---------------------------------------------------------------------------
 
 def gen_voice_clone(text, language, ref_audio, ref_text=""):
-    """Tab 1: Voice Clone — reference audio se aawaz clone karo"""
+    """Tab 1: Voice Clone with long-text support"""
     if not text or not text.strip():
         return None, "⚠️ कृपया टेक्स्ट लिखें।"
     if not ref_audio:
         return None, "⚠️ Reference audio upload karein।"
+
     try:
-        kw = dict(
-            text=text.strip(),
-            language=language if language != "Auto" else None,
-            generation_config=make_gen_config(),
-            voice_clone_prompt=model.create_voice_clone_prompt(
-                ref_audio=ref_audio,
-                ref_text=ref_text.strip() if ref_text else None
-            )
+        # Voice clone prompt ek baar banao (efficient)
+        voice_clone_prompt = model.create_voice_clone_prompt(
+            ref_audio=ref_audio,
+            ref_text=ref_text.strip() if ref_text else None
         )
-        audio = model.generate(**kw)
-        waveform = (audio[0] * 32767).astype(np.int16)
-        return (sampling_rate, waveform), "✅ Voice Clone सफल!"
+        gen_config = make_gen_config()
+
+        # Long text chunking
+        chunks = split_text_into_chunks(text)
+        print(f"📝 Total chunks: {len(chunks)}")
+        for i, c in enumerate(chunks):
+            print(f"  Chunk {i+1}: '{c[:60]}...' ({len(c)} chars)")
+
+        # Har chunk generate karo
+        audio_chunks = []
+        for i, chunk in enumerate(chunks):
+            print(f"🎙️ Generating chunk {i+1}/{len(chunks)}...")
+            chunk_audio = generate_audio_for_chunk(
+                chunk, language, gen_config,
+                voice_clone_prompt=voice_clone_prompt
+            )
+            audio_chunks.append(chunk_audio)
+
+        # Saare chunks join karo
+        final_audio = join_audio_chunks(audio_chunks, silence_ms=250)
+        waveform = (final_audio * 32767).astype(np.int16)
+
+        total_sec = len(waveform) / sampling_rate
+        return (sampling_rate, waveform), f"✅ Voice Clone सफल! {len(chunks)} chunks | {total_sec:.1f} sec audio"
+
     except Exception as e:
         return None, f"❌ Error: {str(e)}"
 
 
 def gen_voice_design(text, language, speed, pitch, energy, pause, style_instruct):
-    """Tab 2: Voice Design — speed, pitch, energy, pause controls"""
+    """Tab 2: Voice Design with chunking"""
     if not text or not text.strip():
         return None, "⚠️ कृपया टेक्स्ट लिखें।"
+
     try:
-        # Voice design parameters ko instruct prompt mein encode karo
-        design_parts = []
-        if speed != 1.0:
-            spd_word = "bahut dheere" if speed < 0.7 else "dheere" if speed < 0.9 else "thoda tez" if speed < 1.2 else "bahut tez"
-            design_parts.append(f"speaking speed: {spd_word} ({speed}x)")
-        if pitch != 0:
-            pitch_word = "bahut neecha" if pitch < -5 else "neecha" if pitch < 0 else "thoda uncha" if pitch < 5 else "bahut uncha"
-            design_parts.append(f"pitch: {pitch_word}")
-        if energy != 1.0:
-            nrg_word = "bahut soft" if energy < 0.6 else "soft" if energy < 0.9 else "energetic" if energy < 1.3 else "bahut loud"
-            design_parts.append(f"energy: {nrg_word}")
-        if pause > 0:
-            design_parts.append(f"pauses: {'natural' if pause < 0.3 else 'extended'}")
+        gen_config = make_gen_config(guidance_scale=2.5, speed=speed, pitch=pitch, energy=energy)
+        instruct = style_instruct.strip() if style_instruct else None
+        chunks = split_text_into_chunks(text)
+        print(f"📝 Voice Design chunks: {len(chunks)}")
 
-        # Instruct mode se voice design apply karo
-        instruct_text = style_instruct if style_instruct else ""
-        if design_parts:
-            instruct_text = (instruct_text + " " if instruct_text else "") + ", ".join(design_parts)
+        audio_chunks = []
+        for i, chunk in enumerate(chunks):
+            print(f"🎛️ Chunk {i+1}/{len(chunks)}: {chunk[:50]}")
+            chunk_audio = generate_audio_for_chunk(chunk, language, gen_config, instruct=instruct)
+            audio_chunks.append(chunk_audio)
 
-        kw = dict(
-            text=text.strip(),
-            language=language if language != "Auto" else None,
-            generation_config=OmniVoiceGenerationConfig(
-                num_step=32,
-                guidance_scale=2.5,
-                denoise=True,
-                preprocess_prompt=True,
-                postprocess_output=True,
-                speed=speed,
-                pitch=pitch,
-                energy=energy,
-            ),
-        )
-        if instruct_text:
-            kw["instruct"] = instruct_text
+        silence_ms = int(pause * 600)  # pause slider → silence duration
+        final_audio = join_audio_chunks(audio_chunks, silence_ms=max(200, silence_ms))
+        waveform = (final_audio * 32767).astype(np.int16)
+        total_sec = len(waveform) / sampling_rate
 
-        audio = model.generate(**kw)
-        waveform = (audio[0] * 32767).astype(np.int16)
-        return (sampling_rate, waveform), f"✅ Voice Design applied! ({', '.join(design_parts) if design_parts else 'default'})"
+        params = f"speed={speed} pitch={pitch} energy={energy}"
+        return (sampling_rate, waveform), f"✅ Voice Design! {len(chunks)} chunks | {total_sec:.1f}s | {params}"
+
     except Exception as e:
-        # Fallback: direct generation bina extra params ke
+        # Fallback: basic mode
         try:
-            kw_simple = dict(
-                text=text.strip(),
-                language=language if language != "Auto" else None,
-                generation_config=make_gen_config(),
-            )
-            if style_instruct:
-                kw_simple["instruct"] = style_instruct
-            audio = model.generate(**kw_simple)
-            waveform = (audio[0] * 32767).astype(np.int16)
-            return (sampling_rate, waveform), f"✅ Generated (basic mode) — {str(e)}"
+            gen_config = make_gen_config()
+            chunks = split_text_into_chunks(text)
+            audio_chunks = []
+            for chunk in chunks:
+                chunk_audio = generate_audio_for_chunk(chunk, language, gen_config, instruct=style_instruct or None)
+                audio_chunks.append(chunk_audio)
+            final_audio = join_audio_chunks(audio_chunks)
+            waveform = (final_audio * 32767).astype(np.int16)
+            return (sampling_rate, waveform), f"✅ Basic mode ({len(chunks)} chunks) — {str(e)}"
         except Exception as e2:
             return None, f"❌ Error: {str(e2)}"
 
 
 def gen_tts(text, language, num_step, guidance_scale):
-    """Tab 3: Simple TTS — seedha text se audio"""
+    """Tab 3: Simple TTS with chunking"""
     if not text or not text.strip():
         return None, "⚠️ कृपया टेक्स्ट लिखें।"
+
     try:
-        kw = dict(
-            text=text.strip(),
-            language=language if language != "Auto" else None,
-            generation_config=make_gen_config(num_step=int(num_step), guidance_scale=guidance_scale),
-        )
-        audio = model.generate(**kw)
-        waveform = (audio[0] * 32767).astype(np.int16)
-        return (sampling_rate, waveform), "✅ TTS सफल!"
+        gen_config = make_gen_config(num_step=int(num_step), guidance_scale=guidance_scale)
+        chunks = split_text_into_chunks(text)
+        print(f"📝 TTS chunks: {len(chunks)}")
+
+        audio_chunks = []
+        for i, chunk in enumerate(chunks):
+            print(f"🔤 Chunk {i+1}/{len(chunks)}: {chunk[:50]}")
+            chunk_audio = generate_audio_for_chunk(chunk, language, gen_config)
+            audio_chunks.append(chunk_audio)
+
+        final_audio = join_audio_chunks(audio_chunks)
+        waveform = (final_audio * 32767).astype(np.int16)
+        total_sec = len(waveform) / sampling_rate
+        return (sampling_rate, waveform), f"✅ TTS सफल! {len(chunks)} chunks | {total_sec:.1f} sec"
+
     except Exception as e:
         return None, f"❌ Error: {str(e)}"
 
 
 def gen_instruct(text, language, instruct_prompt):
-    """Tab 4: Instruct Mode — instruction se voice style control"""
+    """Tab 4: Instruct Mode with chunking"""
     if not text or not text.strip():
         return None, "⚠️ कृपया टेक्स्ट लिखें।"
     if not instruct_prompt or not instruct_prompt.strip():
-        return None, "⚠️ Instruction likhein (jaise: 'speak slowly and clearly in a calm tone')"
+        return None, "⚠️ Instruction likhein।"
+
     try:
-        kw = dict(
-            text=text.strip(),
-            language=language if language != "Auto" else None,
-            generation_config=make_gen_config(guidance_scale=3.0),
-            instruct=instruct_prompt.strip(),
-        )
-        audio = model.generate(**kw)
-        waveform = (audio[0] * 32767).astype(np.int16)
-        return (sampling_rate, waveform), f"✅ Instruct mode: '{instruct_prompt[:40]}...'"
+        gen_config = make_gen_config(guidance_scale=3.0)
+        instruct = instruct_prompt.strip()
+        chunks = split_text_into_chunks(text)
+        print(f"📝 Instruct chunks: {len(chunks)}")
+
+        audio_chunks = []
+        for i, chunk in enumerate(chunks):
+            print(f"📋 Chunk {i+1}/{len(chunks)}: {chunk[:50]}")
+            chunk_audio = generate_audio_for_chunk(chunk, language, gen_config, instruct=instruct)
+            audio_chunks.append(chunk_audio)
+
+        final_audio = join_audio_chunks(audio_chunks)
+        waveform = (final_audio * 32767).astype(np.int16)
+        total_sec = len(waveform) / sampling_rate
+        return (sampling_rate, waveform), f"✅ Instruct: '{instruct[:40]}' | {len(chunks)} chunks | {total_sec:.1f}s"
+
     except Exception as e:
         return None, f"❌ Error: {str(e)}"
 
@@ -225,23 +353,10 @@ footer {visibility: hidden !important;}
 .tag-btn {background: #fff3e0 !important; border: 1px solid #ffcc80 !important; color: #e65100 !important; font-size: 0.8em !important;}
 .gen-btn {font-size: 1.1em !important; padding: 12px !important;}
 .status-box {font-size: 0.9em; color: #444;}
-.slider-row {margin: 4px 0;}
 """
-
-INSTRUCT_EXAMPLES = [
-    "Speak slowly and clearly with a calm, deep voice",
-    "Speak with excitement and high energy",
-    "Speak softly like a bedtime story",
-    "Speak like a news anchor, formal and clear",
-    "Speak in a sad, emotional tone",
-    "Speak fast and enthusiastically like a sports commentator",
-    "धीरे और शांत आवाज़ में बोलें",
-    "जोश और उत्साह के साथ बोलें",
-]
 
 with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo:
 
-    # Header
     gr.HTML("""
         <div class="shiv-header">
             <h1 style="font-size:2.8em; color:#ff6600; margin-bottom:4px;">🔱 Shiv AI Voice Cloning</h1>
@@ -254,14 +369,14 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
 
         # ── TAB 1: Voice Clone ──────────────────────────────────────────────
         with gr.TabItem("🎙️ Voice Clone"):
-            gr.Markdown("### अपनी आवाज़ upload करें और किसी भी भाषा में बोलें!")
+            gr.Markdown("### अपनी आवाज़ upload करें — Long script भी पूरी पढ़ेगा! ✅")
             with gr.Row():
                 with gr.Column(scale=1):
                     vc_text = gr.Textbox(
-                        label="📝 Text to Synthesize",
-                        lines=5,
+                        label="📝 Text / Script (लंबी script भी चलेगी!)",
+                        lines=10,
                         elem_classes="shiv-textbox",
-                        placeholder="यहाँ हिंदी / English / Sanskrit text लिखें..."
+                        placeholder="यहाँ पूरी script paste करें... छोटी हो या बड़ी, सब चलेगा।"
                     )
                     with gr.Row():
                         for tag in EVENT_TAGS:
@@ -269,17 +384,26 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
                             btn.click(fn=None, inputs=[btn, vc_text], outputs=vc_text, js=INSERT_TAG_JS)
                     vc_lang = gr.Dropdown(label="🌐 भाषा (Language)", choices=LANG_CHOICES, value="Auto")
                     vc_ref_audio = gr.Audio(label="🎤 Reference Audio (आपकी आवाज़)", type="filepath")
-                    vc_ref_text = gr.Textbox(label="📄 Reference Text (optional — ref audio ka transcript)", lines=2, placeholder="Optional...")
-                    vc_btn = gr.Button("🔱 Clone Voice", variant="primary", size="lg", elem_classes="gen-btn")
+                    vc_ref_text = gr.Textbox(
+                        label="📄 Reference Transcript (optional)",
+                        lines=2,
+                        placeholder="Reference audio mein jo bola gaya hai woh likhein (optional)..."
+                    )
+                    vc_btn = gr.Button("🔱 Clone & Generate Full Audio", variant="primary", size="lg", elem_classes="gen-btn")
 
                 with gr.Column(scale=1):
-                    vc_audio = gr.Audio(label="🔊 Shiv AI Output", type="numpy")
+                    vc_audio = gr.Audio(label="🔊 Shiv AI Output (Full Audio)", type="numpy")
                     vc_status = gr.Textbox(label="Status", interactive=False, elem_classes="status-box")
                     gr.Markdown("""
-**📌 Tips:**
-- 5-30 second ka clean reference audio best results deta hai
-- Background noise ke bina record karein
-- Jo language mein bolna hai, us mein text likhein
+**📌 Long Script Fix — Kaise kaam karta hai:**
+- Script automatically **chhote chunks** mein toot ti hai
+- Har chunk alag generate hota hai (koi gap nahi)
+- Sab chunks seamlessly **join** ho jaate hain
+- 2 minute ka gap **ab nahi aayega** ✅
+
+**💡 Tips:**
+- `…` (ellipsis) natural pause point ban jaata hai
+- 5–30 sec ka saaf reference audio best hai
                     """)
 
             vc_btn.click(
@@ -294,8 +418,8 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
             with gr.Row():
                 with gr.Column(scale=1):
                     vd_text = gr.Textbox(
-                        label="📝 Text to Synthesize",
-                        lines=5,
+                        label="📝 Text / Script",
+                        lines=8,
                         elem_classes="shiv-textbox",
                         placeholder="यहाँ text लिखें..."
                     )
@@ -306,60 +430,55 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
                     vd_lang = gr.Dropdown(label="🌐 भाषा", choices=LANG_CHOICES, value="Auto")
 
                     gr.Markdown("#### 🎚️ Voice Controls")
-                    with gr.Group():
-                        vd_speed = gr.Slider(
-                            label="⚡ Speed (रफ़्तार)",
-                            minimum=0.5, maximum=2.0, value=1.0, step=0.05,
-                            info="0.5 = बहुत धीमा | 1.0 = Normal | 2.0 = बहुत तेज़"
-                        )
-                        vd_pitch = gr.Slider(
-                            label="🎵 Pitch (आवाज़ की ऊँचाई)",
-                            minimum=-12, maximum=12, value=0, step=1,
-                            info="-12 = बहुत नीचा | 0 = Normal | +12 = बहुत ऊँचा"
-                        )
-                        vd_energy = gr.Slider(
-                            label="💪 Energy (जोश / Volume)",
-                            minimum=0.3, maximum=2.0, value=1.0, step=0.05,
-                            info="0.3 = बहुत soft | 1.0 = Normal | 2.0 = बहुत loud"
-                        )
-                        vd_pause = gr.Slider(
-                            label="⏸️ Pause (रुकना)",
-                            minimum=0.0, maximum=1.0, value=0.0, step=0.1,
-                            info="0 = No extra pause | 1.0 = Long pauses"
-                        )
-
+                    vd_speed = gr.Slider(
+                        label="⚡ Speed (रफ़्तार)",
+                        minimum=0.5, maximum=2.0, value=1.0, step=0.05,
+                        info="0.5=बहुत धीमा | 1.0=Normal | 2.0=बहुत तेज़"
+                    )
+                    vd_pitch = gr.Slider(
+                        label="🎵 Pitch (आवाज़ की ऊँचाई)",
+                        minimum=-12, maximum=12, value=0, step=1,
+                        info="-12=बहुत नीचा | 0=Normal | +12=बहुत ऊँचा"
+                    )
+                    vd_energy = gr.Slider(
+                        label="💪 Energy (जोश / Volume)",
+                        minimum=0.3, maximum=2.0, value=1.0, step=0.05,
+                        info="0.3=बहुत soft | 1.0=Normal | 2.0=बहुत loud"
+                    )
+                    vd_pause = gr.Slider(
+                        label="⏸️ Pause Between Chunks",
+                        minimum=0.0, maximum=1.0, value=0.3, step=0.1,
+                        info="0=No pause | 1.0=Long pauses between chunks"
+                    )
                     vd_style = gr.Textbox(
                         label="✍️ Style Instruction (optional)",
-                        placeholder="जैसे: speak like a calm narrator / emotional tone...",
+                        placeholder="जैसे: speak like a calm narrator...",
                         lines=2
                     )
-                    vd_btn = gr.Button("🎛️ Design & Generate", variant="primary", size="lg", elem_classes="gen-btn")
-
-                    # Preset buttons
                     gr.Markdown("#### ⚡ Quick Presets")
                     with gr.Row():
-                        preset_calm = gr.Button("😌 Calm", size="sm")
-                        preset_excited = gr.Button("🔥 Excited", size="sm")
-                        preset_news = gr.Button("📺 News Anchor", size="sm")
-                        preset_story = gr.Button("📖 Story", size="sm")
+                        preset_calm    = gr.Button("😌 Calm",        size="sm")
+                        preset_excited = gr.Button("🔥 Excited",     size="sm")
+                        preset_news    = gr.Button("📺 News Anchor", size="sm")
+                        preset_story   = gr.Button("📖 Story",       size="sm")
+
+                    vd_btn = gr.Button("🎛️ Design & Generate", variant="primary", size="lg", elem_classes="gen-btn")
 
                 with gr.Column(scale=1):
-                    vd_audio = gr.Audio(label="🔊 Shiv AI Voice Design Output", type="numpy")
+                    vd_audio = gr.Audio(label="🔊 Voice Design Output", type="numpy")
                     vd_status = gr.Textbox(label="Status", interactive=False, elem_classes="status-box")
                     gr.Markdown("""
-**🎛️ Voice Design Guide:**
 | Control | Effect |
 |---------|--------|
 | Speed ↓ | Dheere bolta hai |
 | Speed ↑ | Tez bolta hai |
-| Pitch ↓ | Moti/gahri aawaz |
-| Pitch ↑ | Patli/unchi aawaz |
-| Energy ↓ | Soft/whisper jaisi |
-| Energy ↑ | Bold/loud |
-| Pause ↑ | Zyada rukta hai |
+| Pitch ↓ | Moti/Gahri aawaz |
+| Pitch ↑ | Patli/Unchi aawaz |
+| Energy ↓ | Soft/Whisper |
+| Energy ↑ | Bold/Loud |
+| Pause ↑ | Chunks ke beech zyada gap |
                     """)
 
-            # Preset logic
             preset_calm.click(
                 fn=lambda: (0.8, -2, 0.7, 0.3, "speak calmly and peacefully"),
                 outputs=[vd_speed, vd_pitch, vd_energy, vd_pause, vd_style]
@@ -388,8 +507,8 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
             with gr.Row():
                 with gr.Column(scale=1):
                     tts_text = gr.Textbox(
-                        label="📝 Text",
-                        lines=6,
+                        label="📝 Text / Script",
+                        lines=8,
                         elem_classes="shiv-textbox",
                         placeholder="यहाँ text लिखें..."
                     )
@@ -397,15 +516,14 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
                         for tag in EVENT_TAGS:
                             btn3 = gr.Button(tag, elem_classes="tag-btn", size="sm")
                             btn3.click(fn=None, inputs=[btn3, tts_text], outputs=tts_text, js=INSERT_TAG_JS)
-                    tts_lang = gr.Dropdown(label="🌐 भाषा", choices=LANG_CHOICES, value="Auto")
-                    with gr.Row():
-                        tts_steps = gr.Slider(label="🔢 Steps (quality)", minimum=10, maximum=64, value=32, step=2,
-                                              info="Zyada steps = better quality, lekin slow")
-                        tts_guidance = gr.Slider(label="🎯 Guidance Scale", minimum=1.0, maximum=5.0, value=2.0, step=0.5)
+                    tts_lang     = gr.Dropdown(label="🌐 भाषा", choices=LANG_CHOICES, value="Auto")
+                    tts_steps    = gr.Slider(label="🔢 Steps (Quality)", minimum=10, maximum=64, value=32, step=2,
+                                             info="Zyada steps = better, lekin slow")
+                    tts_guidance = gr.Slider(label="🎯 Guidance Scale", minimum=1.0, maximum=5.0, value=2.0, step=0.5)
                     tts_btn = gr.Button("🔤 Generate TTS", variant="primary", size="lg", elem_classes="gen-btn")
 
                 with gr.Column(scale=1):
-                    tts_audio = gr.Audio(label="🔊 TTS Output", type="numpy")
+                    tts_audio  = gr.Audio(label="🔊 TTS Output", type="numpy")
                     tts_status = gr.Textbox(label="Status", interactive=False, elem_classes="status-box")
 
             tts_btn.click(
@@ -420,8 +538,8 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
             with gr.Row():
                 with gr.Column(scale=1):
                     inst_text = gr.Textbox(
-                        label="📝 Text to Synthesize",
-                        lines=5,
+                        label="📝 Text / Script",
+                        lines=8,
                         elem_classes="shiv-textbox",
                         placeholder="यहाँ text लिखें..."
                     )
@@ -429,26 +547,26 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
                         for tag in EVENT_TAGS:
                             btn4 = gr.Button(tag, elem_classes="tag-btn", size="sm")
                             btn4.click(fn=None, inputs=[btn4, inst_text], outputs=inst_text, js=INSERT_TAG_JS)
-                    inst_lang = gr.Dropdown(label="🌐 भाषा", choices=LANG_CHOICES, value="Auto")
+                    inst_lang   = gr.Dropdown(label="🌐 भाषा", choices=LANG_CHOICES, value="Auto")
                     inst_prompt = gr.Textbox(
                         label="📋 Style Instruction",
                         lines=3,
-                        placeholder="Jaise: 'Speak slowly and clearly in a calm, deep male voice'..."
+                        placeholder="Speak slowly and clearly in a calm, deep male voice..."
                     )
-                    gr.Markdown("**💡 Example Instructions (click to use):**")
+                    gr.Markdown("**💡 Examples (click karein):**")
                     for ex in INSTRUCT_EXAMPLES:
                         ex_btn = gr.Button(ex, size="sm")
                         ex_btn.click(fn=lambda x=ex: x, outputs=inst_prompt)
                     inst_btn = gr.Button("📋 Generate with Instruct", variant="primary", size="lg", elem_classes="gen-btn")
 
                 with gr.Column(scale=1):
-                    inst_audio = gr.Audio(label="🔊 Instruct Mode Output", type="numpy")
+                    inst_audio  = gr.Audio(label="🔊 Instruct Output", type="numpy")
                     inst_status = gr.Textbox(label="Status", interactive=False, elem_classes="status-box")
                     gr.Markdown("""
 **📋 Instruct Mode Tips:**
-- English mein instruction likhna best kaam karta hai
-- Clear aur specific instruction do
-- Jaise: *"Speak like an old wise man, slowly with pauses"*
+- English mein instruction best kaam karta hai
+- Clear aur specific rakho
+- Examples: *"Speak like an old wise man, slowly with pauses"*
 - Ya: *"Fast and energetic like a radio jockey"*
                     """)
 
@@ -458,7 +576,6 @@ with gr.Blocks(theme=theme, css=css, title="🔱 Shiv AI Voice Cloning") as demo
                 outputs=[inst_audio, inst_status]
             )
 
-    # Footer
     gr.HTML("""
         <div style='text-align:center; padding:20px; color:#888; border-top:1px solid #eee; margin-top:20px;'>
             © 2026 🔱 Shiv AI Voice Cloning &nbsp;|&nbsp; Designed by <b>Shri Ram Nag</b> &nbsp;|&nbsp; PAISAWALA 🎬
