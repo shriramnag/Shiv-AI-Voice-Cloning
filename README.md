@@ -1,17 +1,32 @@
+# 🔱 Shiv AI Voice Cloning System
+**Developed by: Shri Ram Nag**
 
-# Run OmniVoice On Google Colab
-
-Run **OmniVoice** easily on Google Colab, no complex setup required.
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/shriramnag/Shiv-AI-Voice-Cloning/blob/main/ShivAIVoice_Colab.ipynb)
+Shiv AI एक अत्याधुनिक AI वॉइस क्लोनिंग प्लेटफॉर्म है जो आपकी आवाज़ को हूबहू कॉपी करने की क्षमता रखता है।
 
 ---
 
+## 🚀 Run Shiv AI on Google Colab
+नीचे दिए गए बटन पर क्लिक करके आप सीधे Google Colab में Shiv AI चला सकते हैं:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/shriramnag/Shiv-AI-Voice-Cloning/blob/main/ShivAI_Voice_Cloning.ipynb)
+
+
+
 ## 🧠 About
 
-This is a **Google Colab version** of the original OmniVoice model.
-It allows you to quickly generate high-quality speech from text with minimal setup.
+## 🛠️ मुख्य विशेषताएँ (Features)
+* **High-Speed Cloning**: 'Turbo Speed' प्रोसेसिंग के साथ।
+* **Owner Branding**: हर जगह **Shri Ram Nag** का नाम और **Shiv AI** की पहचान।
+* **Free Forever**: यह प्रोजेक्ट हमेशा के लिए फ्री है।
+* **Multilingual**: हिंदी और इंग्लिश सहित 600+ भाषाओं का सपोर्ट।
 
+## 📁 प्रोजेक्ट सेटअप
+यह रिपोजिटरी अब आपके आधिकारिक Hugging Face मॉडल `Shriramnag/Shiv-AI-Voice-Cloning` से जुड़ी हुई है।
+
+---
+**Developer:** Shri Ram Nag  
+**AI Name:** Shiv AI  
+**Version:** 2026.1.0
 ---
 
 ## 🔹 What it can do
