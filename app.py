@@ -3,6 +3,7 @@ import sys
 import logging
 import tempfile
 from typing import Any, Dict
+
 import gradio as gr
 import numpy as np
 import torch
@@ -38,20 +39,21 @@ print("🚀 Shiv AI System is starting by Shri Ram Nag...")
 # ---------------------------------------------------------------------------
 # Model Loading (Linking to your Repository)
 # ---------------------------------------------------------------------------
-# यहाँ 'Shriramnag/Shiv-AI-Voice-Cloning' से मॉडल लोड होगा
-model_repo = "Shriramnag/Shiv-AI-Voice-Cloning"
+# यहाँ आपकी रिपॉजिटरी का उपयोग किया गया है
+SHIV_AI_REPO = "Shriramnag/Shiv-AI-Voice-Cloning"
 
 try:
+    print(f"Loading Shiv AI model from {SHIV_AI_REPO}...")
     model = OmniVoice.from_pretrained(
-        model_repo,
+        SHIV_AI_REPO,
         device_map="cuda",
         dtype=torch.float16,
         load_asr=False,
     )
 except Exception as e:
-    print(f"Loading local model files for Shiv AI...")
+    print(f"Falling back to local model path for Shiv AI...")
     model = OmniVoice.from_pretrained(
-        "./", # Local directory
+        "./", 
         device_map="cuda",
         dtype=torch.float16,
         load_asr=False,
@@ -61,59 +63,101 @@ sampling_rate = model.sampling_rate
 print("✅ Shiv AI Model Loaded Successfully!")
 
 # ---------------------------------------------------------------------------
-# Event Tags & UI Settings
+# Event Tags & JS Functions
 # ---------------------------------------------------------------------------
-EVENT_TAGS = ["[laughter]", "[sigh]", "[confirmation-en]", "[question-en]", "[surprise-wa]", "[dissatisfaction-hnn]"]
+EVENT_TAGS = [
+    "[laughter]", "[sigh]", "[confirmation-en]", "[question-en]", 
+    "[surprise-wa]", "[dissatisfaction-hnn]"
+]
 
-# UI Logic Helpers (Keeping your speed requirement in mind)
+# JS for Voice Tag Insertion
+INSERT_TAG_JS = """
+(tag_val, current_text) => {
+    const textarea = document.querySelector('.shiv-textbox textarea');
+    if (!textarea) return current_text + " " + tag_val;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    return current_text.slice(0, start) + " " + tag_val + " " + current_text.slice(end);
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Core Logic & Helpers
+# ---------------------------------------------------------------------------
 def tts_file_name(text, language="hi"):
     clean_text = re.sub(r'[^a-zA-Z\s]', '', text)[:20].strip().replace(" ", "_")
     rand = uuid.uuid4().hex[:6].upper()
     return f"{temp_audio_dir}/ShivAI_{clean_text}_{rand}.wav"
 
+def _gen_core(text, language, ref_audio, instruct, mode, ref_text=None, **kwargs):
+    if not text or not text.strip():
+        return None, "कृपया टेक्स्ट लिखें।"
+
+    gen_config = OmniVoiceGenerationConfig(
+        num_step=32,
+        guidance_scale=2.0,
+        denoise=True,
+        preprocess_prompt=True,
+        postprocess_output=True,
+    )
+
+    kw = dict(text=text.strip(), language=language if language != "Auto" else None, generation_config=gen_config)
+    
+    if mode == "clone":
+        kw["voice_clone_prompt"] = model.create_voice_clone_prompt(ref_audio=ref_audio, ref_text=ref_text)
+    
+    audio = model.generate(**kw)
+    waveform = (audio[0] * 32767).astype(np.int16)
+    return (sampling_rate, waveform), "सफलतापूर्वक जनरेट हुआ!"
+
 # ---------------------------------------------------------------------------
 # Gradio UI Construction (Fully Branded)
 # ---------------------------------------------------------------------------
-theme = gr.themes.Soft(primary_hue="orange", secondary_hue="gray", font=["Inter", "Arial", "sans-serif"])
+theme = gr.themes.Soft(primary_hue="orange", font=["Inter", "Arial", "sans-serif"])
 
 css = """
 .gradio-container {max-width: 100% !important;}
 footer {visibility: hidden !important;}
-.owner-footer {text-align: center; padding: 10px; font-weight: bold; color: #ff6600;}
+.shiv-header {text-align: center; margin: 20px auto; padding: 10px; border-bottom: 2px solid #ff6600;}
+.tag-btn {background: #fff3e0 !important; border: 1px solid #ffcc80 !important; color: #e65100 !important;}
 """
 
 with gr.Blocks(theme=theme, css=css, title="Shiv AI - Shri Ram Nag") as demo:
     gr.HTML("""
-        <div style="text-align: center; margin: 20px auto;">
-            <h1 style="font-size: 3em; color: #ff6600; margin-bottom: 0;">🔱 Shiv AI Voice Cloning</h1>
-            <p style="font-size: 1.2em;">Advanced Multilingual Voice System | <b>Owner: Shri Ram Nag</b></p>
+        <div class="shiv-header">
+            <h1 style="font-size: 2.8em; color: #ff6600; margin-bottom: 0;">🔱 Shiv AI Voice Cloning</h1>
+            <p style="font-size: 1.2em; color: #555;">Advanced Multilingual Speech Engine | <b>Owner: Shri Ram Nag</b></p>
         </div>
     """)
 
     with gr.Tabs():
-        # --- Voice Clone Tab ---
-        with gr.TabItem("Voice Clone (शिव आवाज़ क्लोनिंग)"):
+        with gr.TabItem("Voice Clone (आवाज़ क्लोनिंग)"):
             with gr.Row():
                 with gr.Column():
-                    vc_text = gr.Textbox(label="यहाँ टेक्स्ट लिखें (Hindi/English)", lines=5, placeholder="नमस्ते, मैं शिव एआई हूँ।")
-                    vc_lang = gr.Dropdown(label="भाषा चुनें", choices=["Auto"] + sorted(lang_display_name(n) for n in LANG_NAMES), value="Auto")
-                    vc_ref_audio = gr.Audio(label="अपनी आवाज़ रिकॉर्ड करें या अपलोड करें (3-10 Sec)", type="filepath")
-                    vc_btn = gr.Button("Clone Voice Now", variant="primary")
+                    vc_text = gr.Textbox(label="Text to Synthesize", lines=5, elem_classes="shiv-textbox", placeholder="यहाँ अपना टेक्स्ट लिखें...")
+                    
+                    with gr.Row():
+                        for tag in EVENT_TAGS:
+                            btn = gr.Button(tag, elem_classes="tag-btn", size="sm")
+                            btn.click(fn=None, inputs=[btn, vc_text], outputs=vc_text, js=INSERT_TAG_JS)
+                    
+                    vc_lang = gr.Dropdown(label="भाषा (Language)", choices=["Auto"] + sorted(lang_display_name(n) for n in LANG_NAMES), value="Auto")
+                    vc_ref_audio = gr.Audio(label="अपनी आवाज़ अपलोड करें (Reference Audio)", type="filepath")
+                    vc_btn = gr.Button("शिव आवाज़ जनरेट करें", variant="primary")
                 
                 with gr.Column():
-                    vc_audio = gr.Audio(label="Shiv AI की आवाज़", type="numpy")
-                    gr.Markdown("### **Creator: Shri Ram Nag**")
+                    vc_audio = gr.Audio(label="Shiv AI Output", type="numpy")
+                    gr.Markdown("### **प्रोजेक्ट डेवलपर: श्री राम नाग**")
+                    gr.Markdown("यह सिस्टम आपकी आवाज़ को 600+ भाषाओं में क्लोन कर सकता है।")
 
-    gr.HTML("<div class='owner-footer'>Powered by Shiv AI System | Designed by Shri Ram Nag</div>")
+    gr.HTML("<div style='text-align:center; padding: 20px; color: #888;'>© 2026 Shiv AI | Designed for Shri Ram Nag</div>")
 
-# ---------------------------------------------------------------------------
-# Action Logic
-# ---------------------------------------------------------------------------
-    def generate_voice(text, lang, ref_audio):
-        # यहाँ आपका 'Turbo Speed' जनरेशन लॉजिक चलेगा
-        # (यह हिस्सा आपके पुराने कोड की तरह ही काम करेगा बस नाम बदल दिए गए हैं)
-        pass
+    # इवेंट हैंडलिंग
+    def start_clone(text, lang, ref_aud):
+        res, status = _gen_core(text, lang, ref_aud, None, mode="clone")
+        return res
 
-# --- Launch ---
+    vc_btn.click(fn=start_clone, inputs=[vc_text, vc_lang, vc_ref_audio], outputs=[vc_audio])
+
 if __name__ == "__main__":
-    demo.launch(share=True, show_api=False)
+    demo.launch(share=True)
