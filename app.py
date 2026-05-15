@@ -51,25 +51,55 @@ INSERT_TAG_JS = """
 }
 """
 
-# ── Chunking (hakla fix) ───────────────────────────────────────────────────
-def split_chunks(text, max_ch=120):
-    lines = re.split(r'(?:…\n?|।\n|\n)', text)
-    lines = [l.strip() for l in lines if l.strip()]
-    chunks, cur = [], ""
+# ── Chunking v2 — Long Hindi script fix ───────────────────────────────────
+def split_chunks(text, max_ch=90):
+    """
+    Fixed chunking for long Hindi scripts:
+    - Newline pe split karo (ellipsis … preserve karo — woh dramatic pause hai)
+    - Short consecutive lines ko merge karo meaningful chunk banaane ke liye
+    - Badi lines ko sentence boundary pe toddo
+    - Model ke liye ideal: 60-90 char per chunk
+    """
+    raw_lines = text.split('\n')
+    lines = [l.strip() for l in raw_lines if l.strip()]
+
+    chunks = []
+    cur = ""
+
     for line in lines:
         if len(line) > max_ch:
-            if cur: chunks.append(cur); cur = ""
-            for sent in re.split(r'(?<=[।.!?])\s+', line):
-                if len(cur)+len(sent)+1 <= max_ch: cur = (cur+" "+sent).strip()
+            # Pehle existing buffer flush karo
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            # Badi line ko sentence boundary pe todo
+            parts = re.split(r'(?<=[।.!?,…])\s*', line)
+            sub_cur = ""
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                if len(sub_cur) + len(part) + 1 <= max_ch:
+                    sub_cur = (sub_cur + " " + part).strip() if sub_cur else part
                 else:
-                    if cur: chunks.append(cur)
-                    cur = sent.strip()
+                    if sub_cur:
+                        chunks.append(sub_cur)
+                    sub_cur = part
+            if sub_cur:
+                chunks.append(sub_cur)
         else:
-            if len(cur)+len(line)+1 <= max_ch: cur = (cur+" "+line).strip()
+            # Short line — merge karo agar max_ch ke andar fit hoti hai
+            merged = (cur + " " + line).strip() if cur else line
+            if len(merged) <= max_ch:
+                cur = merged
             else:
-                if cur: chunks.append(cur)
-                cur = line.strip()
-    if cur: chunks.append(cur)
+                if cur:
+                    chunks.append(cur)
+                cur = line
+
+    if cur:
+        chunks.append(cur)
+
     return [c for c in chunks if c.strip()]
 
 def join_chunks(audios, sil_ms=0):
